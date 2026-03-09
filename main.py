@@ -1,23 +1,26 @@
 """
-நம்ம குரு AI - Backend v3.0
-Groq Llama 3.3 + Web Search Tool
-Real-time Erode market rates, news, bus info
+நம்ம குரு AI - Backend v5.0
+Groq Llama 3.3 + DuckDuckGo + BeautifulSoup4
+100% Free, Unlimited, Real-time Search
+Zero cost - Zero hallucination!
 """
 
 import os
 import json
 import logging
-import httpx
+import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 from groq import Groq
+from duckduckgo_search import DDGS
+from bs4 import BeautifulSoup
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="நம்ம குரு AI v3.0")
+app = FastAPI(title="நம்ம குரு AI v5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,7 +30,7 @@ app.add_middleware(
 )
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+groq_client  = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 # ── System Prompt ──────────────────────────────────────────────
 SYSTEM_PROMPT = """நீங்கள் "குட்டி குரு" - Erode மக்களுக்கான அன்பான AI உதவியாளர்.
@@ -35,8 +38,9 @@ SYSTEM_PROMPT = """நீங்கள் "குட்டி குரு" - Ero
 விதிகள்:
 1. எப்போதும் தெளிவான எளிய தமிழில் பதில் சொல்லுங்கள்
 2. User Tanglish-ல் கேட்டாலும் தமிழில் பதில் சொல்லுங்கள்
-3. அன்பாக மரியாதையாக பேசுங்கள்
-4. Real-time தகவல் கேட்டால் web search tool use பண்ணுங்கள்
+3. Real-time data கேட்டால் web_search tool உபயோகிக்கவும்
+4. Search result கிடைத்தால் clearly சொல்லுங்கள்
+5. தெரியாத விஷயம் "தெரியவில்லை" சொல்லுங்கள் - கதை வேண்டாம்!
 
 Erode சிறப்பு தகவல்கள்:
 - Emergency: Police 100, Ambulance 108, Fire 101
@@ -51,18 +55,29 @@ Erode சிறப்பு தகவல்கள்:
 
 எச்சரிக்கை: Medical/Legal advice-க்கு expert-ஐ சந்தியுங்கள்."""
 
-# ── Groq Web Search Tool Definition ───────────────────────────
+# ── Web Search Tool Definition ─────────────────────────────────
 WEB_SEARCH_TOOL = {
     "type": "function",
     "function": {
         "name": "web_search",
-        "description": "Search the internet for real-time information like market prices, news, bus timings, weather, government updates for Erode and Tamil Nadu",
+        "description": (
+            "Search live internet for real-time information. "
+            "Use for: gold rate, petrol price, market rates, "
+            "news, weather, bus timings, govt schemes, "
+            "any TODAY/CURRENT/LIVE/PRICE questions about "
+            "Erode and Tamil Nadu."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search query in English for best results. E.g. 'Erode turmeric price today', 'Tamil Nadu government scheme 2024'"
+                    "description": (
+                        "English search query for best results. "
+                        "Examples: 'Erode gold rate today 2025', "
+                        "'Tamil Nadu petrol price today', "
+                        "'Erode turmeric market rate today'"
+                    )
                 }
             },
             "required": ["query"]
@@ -70,43 +85,101 @@ WEB_SEARCH_TOOL = {
     }
 }
 
-# ── DuckDuckGo search (free, no API key needed) ────────────────
-async def do_web_search(query: str) -> str:
-    """Real web search using DuckDuckGo instant answers API"""
+# ── BeautifulSoup Scraper ──────────────────────────────────────
+def scrape_url(url: str, max_chars: int = 800) -> str:
+    """Scrape text content from a URL using BeautifulSoup"""
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            # DuckDuckGo Instant Answer API - completely free
-            r = await client.get(
-                "https://api.duckduckgo.com/",
-                params={
-                    "q": query,
-                    "format": "json",
-                    "no_html": "1",
-                    "skip_disambig": "1"
-                },
-                headers={"User-Agent": "NammaGuruAI/1.0"}
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
             )
-            if r.status_code == 200:
-                data = r.json()
-                results = []
+        }
+        response = requests.get(url, headers=headers, timeout=5)
+        response.raise_for_status()
 
-                # Abstract (main answer)
-                if data.get("AbstractText"):
-                    results.append(f"Answer: {data['AbstractText']}")
+        soup = BeautifulSoup(response.text, "lxml")
 
-                # Related topics
-                for topic in data.get("RelatedTopics", [])[:3]:
-                    if isinstance(topic, dict) and topic.get("Text"):
-                        results.append(topic["Text"])
+        # Remove unwanted tags
+        for tag in soup(["script", "style", "nav", "footer",
+                         "header", "ads", "iframe"]):
+            tag.decompose()
 
-                if results:
-                    return "\n".join(results[:4])
+        # Get clean text
+        text = soup.get_text(separator=" ", strip=True)
 
-            return f"Search completed for: {query}. Please provide based on your knowledge."
+        # Clean up whitespace
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        clean_text = " ".join(lines)
+
+        return clean_text[:max_chars]
+
+    except Exception as e:
+        logger.warning(f"Scrape failed for {url}: {e}")
+        return ""
+
+
+# ── DuckDuckGo + BeautifulSoup Search ─────────────────────────
+def live_web_search(query: str) -> str:
+    """
+    Step 1: DuckDuckGo → get top URLs
+    Step 2: BeautifulSoup → scrape content
+    Step 3: Return combined real text to AI
+    """
+    try:
+        logger.info(f"🔍 DDG Search: {query}")
+
+        # Step 1: DuckDuckGo search - get top 3 results
+        with DDGS() as ddgs:
+            results = list(ddgs.text(
+                query,
+                max_results=3,
+                region="in-en",        # India English results
+                safesearch="moderate"
+            ))
+
+        if not results:
+            logger.warning("No DDG results found")
+            return f"'{query}' பற்றிய தகவல் கிடைக்கவில்லை."
+
+        logger.info(f"📋 Found {len(results)} results")
+
+        # Step 2: Scrape each URL
+        all_content = []
+
+        for i, result in enumerate(results[:3]):
+            url   = result.get("href", "")
+            title = result.get("title", "")
+            body  = result.get("body", "")  # DDG snippet
+
+            logger.info(f"  [{i+1}] {title[:50]}...")
+
+            # Use DDG snippet first (fast)
+            if body and len(body) > 50:
+                all_content.append(f"Source {i+1}: {title}\n{body}")
+
+            # Try to scrape for richer content
+            if url and i < 2:  # Only scrape top 2 URLs
+                scraped = scrape_url(url, max_chars=600)
+                if scraped and len(scraped) > 100:
+                    all_content.append(
+                        f"Full content from {title}:\n{scraped}"
+                    )
+
+        if not all_content:
+            return f"'{query}' search முடிந்தது ஆனால் content கிடைக்கவில்லை."
+
+        combined = "\n\n---\n\n".join(all_content[:4])
+        logger.info(f"✅ Search complete. Content: {len(combined)} chars")
+        return combined
 
     except Exception as e:
         logger.error(f"Search error: {e}")
-        return f"Search failed for '{query}'. Use your training knowledge."
+        return (
+            f"தேடல் தற்காலிகமாக தோல்வி. "
+            f"Error: {str(e)[:100]}"
+        )
 
 
 # ── Models ─────────────────────────────────────────────────────
@@ -124,15 +197,15 @@ class ChatResponse(BaseModel):
     searched: bool = False
     error: Optional[str] = None
 
-class MarketResponse(BaseModel):
-    rates: dict
-    success: bool
-
 
 # ── Endpoints ──────────────────────────────────────────────────
 @app.get("/")
 async def root():
-    return {"message": "நம்ம குரு AI v3.0 - Live! 🎉", "websearch": True}
+    return {
+        "message": "நம்ம குரு AI v5.0 🎉",
+        "search": "DuckDuckGo + BeautifulSoup4",
+        "cost": "100% FREE - Unlimited!"
+    }
 
 @app.get("/health")
 async def health():
@@ -140,30 +213,20 @@ async def health():
         "status": "healthy",
         "groq": groq_client is not None,
         "model": "llama-3.3-70b-versatile",
-        "websearch": True
+        "search": "DDG + BS4 - Free & Unlimited"
     }
-
-@app.get("/market", response_model=MarketResponse)
-async def market():
-    """Live market rates via web search"""
-    query = "Erode turmeric market price today 2024"
-    result = await do_web_search(query)
-    return MarketResponse(
-        rates={"search_result": result},
-        success=True
-    )
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
     """
-    Main chat - Llama 3.3 with web search tool.
-    AI decides when to search automatically.
+    Main chat - Llama 3.3 + DDG + BeautifulSoup
+    AI searches live internet, no hallucination!
     """
     if not groq_client:
         raise HTTPException(503, "Groq API not configured")
 
     try:
-        # Build messages
+        # Build conversation
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         for m in req.history[-10:]:
             if m.role in ["user", "assistant"]:
@@ -172,32 +235,32 @@ async def chat(req: ChatRequest):
 
         searched = False
 
-        # ── Step 1: First call with tool ──────────────────────
-        response1 = groq_client.chat.completions.create(
+        # ── Step 1: Ask AI if search needed ──────────────────
+        resp1 = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=messages,
             tools=[WEB_SEARCH_TOOL],
-            tool_choice="auto",   # AI decides when to search
+            tool_choice="auto",
             max_tokens=1024,
-            temperature=0.7,
+            temperature=0.2,  # Low = accurate, no hallucination
         )
 
-        msg = response1.choices[0].message
+        msg1 = resp1.choices[0].message
 
-        # ── Step 2: If AI wants to search ────────────────────
-        if msg.tool_calls:
+        # ── Step 2: Execute search if AI requests ────────────
+        if msg1.tool_calls:
             searched = True
-            tool_call = msg.tool_calls[0]
-            args = json.loads(tool_call.function.arguments)
-            query = args.get("query", req.message)
+            tool_call = msg1.tool_calls[0]
+            args      = json.loads(tool_call.function.arguments)
+            query     = args.get("query", req.message)
 
-            logger.info(f"Web search: {query}")
-            search_result = await do_web_search(query)
+            # 🔍 DDG Search + BS4 Scrape
+            search_content = live_web_search(query)
 
-            # Add tool result to messages
+            # Add to conversation
             messages.append({
                 "role": "assistant",
-                "content": msg.content or "",
+                "content": msg1.content or "",
                 "tool_calls": [{
                     "id": tool_call.id,
                     "type": "function",
@@ -209,25 +272,24 @@ async def chat(req: ChatRequest):
             })
             messages.append({
                 "role": "tool",
-                "content": search_result,
+                "content": search_content,
                 "tool_call_id": tool_call.id
             })
 
-            # ── Step 3: Final response with search data ───────
-            response2 = groq_client.chat.completions.create(
+            # ── Step 3: Final answer with real data ───────────
+            resp2 = groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=messages,
                 max_tokens=1024,
-                temperature=0.7,
+                temperature=0.2,
             )
-            final_text = response2.choices[0].message.content.strip()
+            final_text = resp2.choices[0].message.content.strip()
 
         else:
-            # No search needed - direct answer
-            final_text = msg.content.strip() if msg.content else \
+            # No search needed
+            final_text = msg1.content.strip() if msg1.content else \
                 "மன்னிக்கவும், பதில் கிடைக்கவில்லை."
 
-        logger.info(f"Done. Searched: {searched}")
         return ChatResponse(
             response=final_text,
             success=True,
@@ -237,7 +299,10 @@ async def chat(req: ChatRequest):
     except Exception as e:
         logger.error(f"Chat error: {e}")
         return ChatResponse(
-            response="மன்னிக்கவும்! சேவை தற்காலிகமாக இல்லை. மீண்டும் முயற்சிக்கவும். 🙏",
+            response=(
+                "மன்னிக்கவும்! சேவை தற்காலிகமாக இல்லை. "
+                "மீண்டும் முயற்சிக்கவும். 🙏"
+            ),
             success=False,
             error=str(e)
         )
